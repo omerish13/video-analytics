@@ -5,7 +5,7 @@ from utils.menu import get_video_path
 import cv2
 import time
 
-def preprocess_video(video_path):
+def preprocess_video(video_path: str) -> list:
     """
     Preprocess the video to detect movements and store results.
     
@@ -26,7 +26,7 @@ def preprocess_video(video_path):
 
     return results
 
-def playback_results(results):
+def playback_results(results: list) -> None:
     """
     Playback the stored results according to the original video timing.
     """
