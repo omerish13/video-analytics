@@ -1,7 +1,7 @@
-from streamer import Streamer
-from detector import Detector
-from display import Display
-from menu import get_video_path
+from entities.streamer import Streamer
+from entities.detector import Detector
+from entities.display import Display
+from utils.menu import get_video_path
 import cv2
 import time
 
