@@ -17,7 +17,7 @@ source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
 # Install dependencies
 pip install -r requirements.txt 
 
-## My recommendation - use UV
+# My recommendation - use UV
 # Create virtual environment (optional)
 # Install uv from https://docs.astral.sh/uv/
 uv venv
@@ -29,7 +29,6 @@ uv pip intall -r requirements.txt
 
 ## Usage
 ```python
-# Example code showing how to use the project
 python main.py
 ```
 
