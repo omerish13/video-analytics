@@ -1,6 +1,5 @@
 from typing import Generator
 import cv2
-import time
 
 class Streamer:
     def __init__(self, video_path):
@@ -22,16 +21,12 @@ class Streamer:
         if not video_capture.isOpened():
             raise ValueError(f"Error: Could not open video file {self.video_path}")
         
-        fps = video_capture.get(cv2.CAP_PROP_FPS)  # Frames per second
-        frame_delay = 1.0 / fps  # Time delay between frames (in seconds)
-
         while True:
             ret, frame = video_capture.read()
-            if not ret:  # End of video
+            if not ret:
                 break
-            
             timestamp = video_capture.get(cv2.CAP_PROP_POS_MSEC)
-            yield frame, timestamp, frame_delay  # Yield frame, timestamp, and delay
-            time.sleep(frame_delay)  # Delay to match real-time playback
+            # yield the frame and timestamp
+            yield frame, timestamp
 
         video_capture.release()
