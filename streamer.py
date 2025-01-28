@@ -1,16 +1,21 @@
+from typing import Generator
 import cv2
 
 class Streamer:
     def __init__(self, video_path):
         self.video_path = video_path
 
-    def frame_generator(self):
+    def frame_generator(self)->Generator[tuple, None, None]:
         """
-        Generator function that yields frames and their corresponding timestamps from a video file.
-        Yields:
-            tuple: A tuple containing a video frame (numpy.ndarray) and its timestamp (float) in milliseconds.
+        Generates video frames and timestamps.
+
         Raises:
             ValueError: If the video file cannot be opened.
+
+        Yields:
+            tuple: A tuple containing:
+                - numpy.ndarray: A video frame.
+                - int: The timestamp of the video frame.
         """
         video_capture = cv2.VideoCapture(self.video_path)
         if not video_capture.isOpened():
