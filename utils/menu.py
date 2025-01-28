@@ -1,3 +1,5 @@
+import os
+
 def get_video_path():
     print("\n=== Video Path Input ===")
     print("Please enter the path to your video file:")
@@ -15,5 +17,9 @@ def get_video_path():
             confirm = input("Do you want to continue anyway? (y/n): ").lower()
             if confirm != 'y':
                 continue
+        
+        if not os.path.exists(video_path):
+            print("Error: File not found. Please try again.")
+            continue
                 
         return video_path

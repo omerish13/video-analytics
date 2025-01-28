@@ -36,10 +36,8 @@ def playback_results(results: list) -> None:
     for frame, movements, timestamp in results:
         # Synchronize to the original video timing
         elapsed_time = (time.time() - start_time) * 1000  # Elapsed time in milliseconds
-        while elapsed_time < timestamp:
-            time.sleep(0.001)  # Wait until it's time to display the frame
-            elapsed_time = (time.time() - start_time) * 1000
-        
+        if elapsed_time < timestamp:
+            time.sleep((timestamp - elapsed_time) / 1000)  # Wait until it's time to display the frame
 
         # Display the frame
         if display.show_frame(display.draw_frame(frame, movements, timestamp)):
