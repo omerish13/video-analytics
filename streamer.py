@@ -6,7 +6,11 @@ class Streamer:
 
     def frame_generator(self):
         """
-        Generator that reads frames from the video file and yields them one by one.
+        Generator function that yields frames and their corresponding timestamps from a video file.
+        Yields:
+            tuple: A tuple containing a video frame (numpy.ndarray) and its timestamp (float) in milliseconds.
+        Raises:
+            ValueError: If the video file cannot be opened.
         """
         video_capture = cv2.VideoCapture(self.video_path)
         if not video_capture.isOpened():
@@ -14,9 +18,10 @@ class Streamer:
         
         while True:
             ret, frame = video_capture.read()
-            if not ret:  # End of video
+            if not ret:
                 break
             timestamp = video_capture.get(cv2.CAP_PROP_POS_MSEC)
-            yield frame, timestamp  # Yield frame and timestamp
+            # yield the frame and timestamp
+            yield frame, timestamp
 
         video_capture.release()
