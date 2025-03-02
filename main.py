@@ -1,60 +1,79 @@
-from entities.streamer import Streamer
-from entities.detector import Detector
-from entities.display import Display
-from utils.menu import get_video_path
-import cv2
+
 import time
+import threading
+from entities.streamer import VideoStreamer
+from entities.detector import MotionDetector
+from entities.display import VideoDisplay
+from entities import KAFKA_BOOTSTRAP_SERVERS, FRAME_TOPIC, DETECTION_TOPIC, OUTPUT_VIDEO_PATH
+from entities import processing_complete, setup_kafka_topics, delete_kafka_topics
+from utils.menu import get_video_path
+from entities import logger
 
-def preprocess_video(video_path: str) -> list:
-    """
-    Preprocess the video to detect movements and store results.
+
+
+def main():
+    # Create new Kafka topics for this run
+    setup_kafka_topics()
+
+    video_path = get_video_path()
+    if not video_path:
+        logger.error("Error: Video path is empty. Exiting.")
+        return
     
-    Returns:
-        results (list): A list of tuples (frame, movements, timestamp).
-    """
-    streamer = Streamer(video_path)
-    detector = Detector()
-
-    results = []
-    prev_frame = None
-
-    for frame, timestamp in streamer.frame_generator():
-        # Detect movements
-        movements, prev_frame = detector.detect_movements(frame, prev_frame)
-        # Store results
-        results.append((frame, movements, timestamp))
-
-    return results
-
-def playback_results(results: list) -> None:
-    """
-    Playback the stored results according to the original video timing.
-    """
-    display = Display()
-    start_time = time.time()
-
-    for frame, movements, timestamp in results:
-        # Synchronize to the original video timing
-        elapsed_time = (time.time() - start_time) * 1000  # Elapsed time in milliseconds
-        if elapsed_time < timestamp:
-            time.sleep((timestamp - elapsed_time) / 1000)  # Wait until it's time to display the frame
-
-        # Display the frame
-        if display.show_frame(display.draw_frame(frame, movements, timestamp)):
-            break  # Exit on user request
-
-    print("Video playback complete.")
-    cv2.destroyAllWindows()
+    try:
+        # Create instances of the three components
+        streamer = VideoStreamer(video_path, KAFKA_BOOTSTRAP_SERVERS, FRAME_TOPIC)
+        detector = MotionDetector(KAFKA_BOOTSTRAP_SERVERS, FRAME_TOPIC, DETECTION_TOPIC)
+        display = VideoDisplay(KAFKA_BOOTSTRAP_SERVERS, DETECTION_TOPIC, OUTPUT_VIDEO_PATH)
+        
+        logger.info(f"Motion detection system starting...")
+        logger.info(f"Processing video: {video_path}")
+        logger.info(f"Topics: frames={FRAME_TOPIC}, detections={DETECTION_TOPIC}")
+        logger.info(f"Results will be saved to a video file for playback after processing")
+        
+        # Start each component in a separate thread
+        streamer_thread = threading.Thread(target=streamer.start)
+        detector_thread = threading.Thread(target=detector.start)
+        display_thread = threading.Thread(target=display.start)
+        
+        # Mark threads as daemon so they exit when main thread exits
+        streamer_thread.daemon = True
+        detector_thread.daemon = True
+        display_thread.daemon = True
+        
+        # Start the threads
+        streamer_thread.start()
+        detector_thread.start()
+        display_thread.start()
+        
+        # Wait for all threads to complete with a timeout mechanism
+        max_wait_time = 3600  # 1 hour max
+        wait_time = 0
+        check_interval = 5  # Check every 5 seconds
+        
+        while (streamer_thread.is_alive() or detector_thread.is_alive() or display_thread.is_alive()) and wait_time < max_wait_time:
+            time.sleep(check_interval)
+            wait_time += check_interval
+            
+            if processing_complete:
+                logger.info("Processing complete. Breaking out of wait loop.")
+                break
+        
+        if wait_time >= max_wait_time:
+            logger.warning("WARNING: Processing timed out after 1 hour.")
+        
+        # Play the processed video once processing is complete
+        logger.info("Processing complete. Playing the result video...")
+        display.play_video()
+        
+    except KeyboardInterrupt:
+        logger.info("\nInterrupted by user. Shutting down...")
+    except Exception as e:
+        logger.error(f"Error in main: {e}")
+    finally:
+        # Delete Kafka topics used for this run
+        delete_kafka_topics()
+        logger.info("Application exited")
 
 if __name__ == "__main__":
-    video_path = get_video_path()
-
-    # Preprocess the video
-    print("Preprocessing video...")
-    results = preprocess_video(video_path)
-
-    # Playback the results
-    print("Playing back results...")
-    playback_results(results)
-
-    
+    main()
