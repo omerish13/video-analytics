@@ -26,10 +26,10 @@ def main():
         detector = MotionDetector(KAFKA_BOOTSTRAP_SERVERS, FRAME_TOPIC, DETECTION_TOPIC)
         display = VideoDisplay(KAFKA_BOOTSTRAP_SERVERS, DETECTION_TOPIC, OUTPUT_VIDEO_PATH)
         
-        logger.info(f"Motion detection system starting...")
+        logger.info("Motion detection system starting...")
         logger.info(f"Processing video: {video_path}")
         logger.info(f"Topics: frames={FRAME_TOPIC}, detections={DETECTION_TOPIC}")
-        logger.info(f"Results will be saved to a video file for playback after processing")
+        logger.info("Results will be saved to a video file for playback after processing")
         
         # Start each component in a separate thread
         streamer_thread = threading.Thread(target=streamer.start)
