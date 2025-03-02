@@ -1,9 +1,12 @@
-import cv2
 import json
+import uuid
+
+import cv2
 import numpy as np
 from kafka import KafkaConsumer, KafkaProducer
-import uuid
-from entities import DETECTION_THRESHOLD,logger, MAX_MESSAGE_SIZE
+
+from entities import DETECTION_THRESHOLD, MAX_MESSAGE_SIZE, logger
+
 
 class MotionDetector:
     def __init__(self, kafka_bootstrap_servers, input_topic, output_topic):
@@ -27,30 +30,30 @@ class MotionDetector:
         )
         self.prev_frame = None
         self.processed_frames = 0
-        
+
     def start(self):
         logger.info("Starting Motion Detector...")
         try:
             for message in self.consumer:
                 frame_data = message.value
                 frame_id = frame_data['frame_id']
-                
+
                 # Check if this is the last frame signal
                 if frame_data.get('is_last_frame', False):
                     # Forward the end-of-stream signal
                     self.producer.send(self.output_topic, frame_data)
                     logger.info("Motion Detector received end-of-stream signal. Forwarding to Display.")
                     break
-                
+
                 # Convert hex string back to bytes and decode image
                 frame_bytes = bytes.fromhex(frame_data['frame'])
                 frame_arr = np.frombuffer(frame_bytes, dtype=np.uint8)
                 frame = cv2.imdecode(frame_arr, cv2.IMREAD_COLOR)
-                
+
                 # Convert to grayscale for motion detection
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 gray = cv2.GaussianBlur(gray, (21, 21), 0)
-                
+
                 # Initialize previous frame for the first frame
                 if self.prev_frame is None:
                     self.prev_frame = gray
@@ -68,22 +71,22 @@ class MotionDetector:
                     self.producer.send(self.output_topic, output_data)
                     self.processed_frames += 1
                     continue
-                
+
                 # Calculate absolute difference between current and previous frame
                 frame_delta = cv2.absdiff(self.prev_frame, gray)
                 thresh = cv2.threshold(frame_delta, 25, 255, cv2.THRESH_BINARY)[1]
-                
+
                 # Dilate the thresholded image to fill in holes
                 thresh = cv2.dilate(thresh, None, iterations=2)
-                
+
                 # Find contours on thresholded image
                 contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                
+
                 motion_regions = []
                 for contour in contours:
                     if cv2.contourArea(contour) < DETECTION_THRESHOLD:
                         continue
-                    
+
                     (x, y, w, h) = cv2.boundingRect(contour)
                     motion_regions.append({
                         'x': int(x),
@@ -91,10 +94,10 @@ class MotionDetector:
                         'w': int(w),
                         'h': int(h)
                     })
-                
+
                 # Update previous frame
                 self.prev_frame = gray
-                
+
                 # Create output data with original frame and detected regions
                 output_data = {
                     'frame_id': frame_id,
@@ -106,15 +109,15 @@ class MotionDetector:
                     'motion_regions': motion_regions,
                     'is_last_frame': False
                 }
-                
+
                 # Send to output topic
                 self.producer.send(self.output_topic, output_data)
                 self.processed_frames += 1
-                
+
                 # Report progress occasionally
                 if self.processed_frames % 100 == 0:
                     logger.info(f"Detector processed {self.processed_frames} frames")
-                
+
         except Exception as e:
             logger.error(f"Error in Motion Detector: {e}")
         finally:
