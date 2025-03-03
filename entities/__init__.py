@@ -1,27 +1,28 @@
 import hashlib
-import logging
 import os
 import time
-
-from kafka import KafkaAdminClient
-from kafka.admin import NewTopic
-from kafka.errors import UnknownTopicOrPartitionError
-
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger('motion_detection')
+import asyncio
+from nats.aio.client import Client as NATS
+from utils.menu import get_video_path
+from utils.logger import logger
 
 # Configuration
-KAFKA_BOOTSTRAP_SERVERS = 'localhost:9092'
-VIDEO_PATH = 'files/sample.mp4'  # Path to your video file
+NATS_SERVER = 'nats://localhost:4222'
+VIDEO_PATH = get_video_path()  # Path to your video file
 DETECTION_THRESHOLD = 5000  # Adjust sensitivity of motion detection
 BLUR_AMOUNT = 15  # Higher values mean more blur
 OUTPUT_VIDEO_PATH = 'processed_video.mp4'  # Temporary output file
-MAX_MESSAGE_SIZE = 20971520  # 20MB for larger frames
 
-# Generate unique topic names based on the video file
-def generate_topic_names(video_path):
-    """Generate unique topic names based on the video file path"""
+# Generate unique file storage path for this run
+RUN_ID = hashlib.md5(f"{VIDEO_PATH}_{time.time()}".encode()).hexdigest()[:8]
+TEMP_DIR = f"temp_frames_{RUN_ID}"
+
+# Ensure temp directory exists
+os.makedirs(TEMP_DIR, exist_ok=True)
+
+# Generate unique stream names based on the video file
+def generate_stream_names(video_path):
+    """Generate unique stream names based on the video file path"""
     # Create a unique hash based on the video path and current timestamp
     hash_input = f"{video_path}_{time.time()}"
     hash_obj = hashlib.md5(hash_input.encode())
@@ -30,48 +31,111 @@ def generate_topic_names(video_path):
     # Get video filename without extension
     video_name = os.path.splitext(os.path.basename(video_path))[0]
 
-    # Create safe topic names (Kafka topics have naming restrictions)
+    # Create safe stream names
     safe_name = ''.join(c if c.isalnum() else '_' for c in video_name)
 
-    # Create unique topic names
-    frame_topic = f"frames_{safe_name}_{hash_str}"
-    detection_topic = f"detections_{safe_name}_{hash_str}"
+    # Create unique stream names
+    frame_stream = f"frames_{safe_name}_{hash_str}"
+    detection_stream = f"detections_{safe_name}_{hash_str}"
 
-    return frame_topic, detection_topic
+    return frame_stream, detection_stream
 
-# Generate the topic names for this run
-FRAME_TOPIC, DETECTION_TOPIC = generate_topic_names(VIDEO_PATH)
+# Generate the stream names for this run
+FRAME_STREAM, DETECTION_STREAM = generate_stream_names(VIDEO_PATH)
 
 # Global flag for signaling completion
 processing_complete = False
 
-def setup_kafka_topics():
-    """Create new Kafka topics for this video processing run"""
-    admin_client = KafkaAdminClient(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS)
+# Shared event loop for async operations
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
 
-    # Create new topics for this run
-    topics_to_create = [
-        NewTopic(FRAME_TOPIC, 1, 1),
-        NewTopic(DETECTION_TOPIC, 1, 1)
-    ]
+async def setup_nats_connection():
+    """Create a connection to NATS"""
+    # Setup connection with reasonable defaults
+    nc = NATS()
+    options = {
+        'servers': [NATS_SERVER],
+        'reconnect_time_wait': 5,
+        'max_reconnect_attempts': 10,
+        'ping_interval': 20,  # More frequent pings to maintain connection
+        'allow_reconnect': True
+    }
+    await nc.connect(**options)
+    return nc
+async def setup_jetstream(nc):
+    """Get JetStream context from NATS connection"""
+    js = nc.jetstream()
+    return js
 
+async def setup_streams():
+    """Create JetStream streams for this video processing run"""
+    nc = await setup_nats_connection()
+    js = await setup_jetstream(nc)
+
+    # Create streams with memory storage for speed
     try:
-        admin_client.create_topics(topics_to_create)
-        logger.info(f"Created Kafka topics: {[t.name for t in topics_to_create]}")
+        # Create frame stream - for smaller metadata
+        await js.add_stream(
+            name=FRAME_STREAM,
+            subjects=[f"{FRAME_STREAM}.*"],
+            max_msgs_per_subject=10000,  # Limit messages per subject
+            discard="old"  # Discard old messages if limit is reached
+        )
+        logger.info(f"Created frame stream: {FRAME_STREAM}")
+
+        # Create detection stream
+        await js.add_stream(
+            name=DETECTION_STREAM,
+            subjects=[f"{DETECTION_STREAM}.*"],
+            max_msgs_per_subject=10000,
+            discard="old"
+        )
+        logger.info(f"Created detection stream: {DETECTION_STREAM}")
     except Exception as e:
-        logger.error(f"Error creating topics: {e}")
+        logger.error(f"Error creating streams: {e}")
 
-    logger.info(f"Using topics: frames={FRAME_TOPIC}, detections={DETECTION_TOPIC}")
+    await nc.close()
+    logger.info(f"Using streams: frames={FRAME_STREAM}, detections={DETECTION_STREAM}")
 
-def delete_kafka_topics():
-    """Delete the Kafka topics used for this run"""
-    admin_client = KafkaAdminClient(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS)
-
+async def delete_streams():
+    """Delete the JetStream streams used for this run"""
     try:
-        # Delete topics
-        admin_client.delete_topics([FRAME_TOPIC, DETECTION_TOPIC])
-        logger.info(f"Deleted Kafka topics: {FRAME_TOPIC}, {DETECTION_TOPIC}")
-    except UnknownTopicOrPartitionError:
-        logger.warning("Topics already deleted or don't exist")
+        nc = await setup_nats_connection()
+        js = await setup_jetstream(nc)
+
+        # Delete streams
+        await js.delete_stream(FRAME_STREAM)
+        await js.delete_stream(DETECTION_STREAM)
+        logger.info(f"Deleted streams: {FRAME_STREAM}, {DETECTION_STREAM}")
+
+        await nc.close()
     except Exception as e:
-        logger.error(f"Error deleting topics: {e}")
+        logger.error(f"Error deleting streams: {e}")
+
+def clean_temp_files():
+    """Clean up temporary frame files"""
+    try:
+        for filename in os.listdir(TEMP_DIR):
+            file_path = os.path.join(TEMP_DIR, filename)
+            try:
+                if os.path.isfile(file_path):
+                    os.unlink(file_path)
+            except Exception as e:
+                logger.error(f"Error deleting {file_path}: {e}")
+        os.rmdir(TEMP_DIR)
+        logger.info(f"Cleaned up temporary directory {TEMP_DIR}")
+    except Exception as e:
+        logger.error(f"Error cleaning temporary files: {e}")
+
+def setup_nats_streams_sync():
+    """Synchronous wrapper to set up NATS streams"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(setup_streams())
+
+def delete_nats_streams_sync():
+    """Synchronous wrapper to delete NATS streams"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(delete_streams())

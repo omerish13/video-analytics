@@ -2,26 +2,25 @@ import json
 import time
 
 import cv2
-from kafka import KafkaProducer
+from entities import (
+    TEMP_DIR, setup_nats_connection, setup_jetstream,
+)
 
-from entities import MAX_MESSAGE_SIZE, logger
+from utils.logger import logger
+import asyncio
+import os
 
 
 class VideoStreamer:
-    def __init__(self, video_path, kafka_bootstrap_servers, topic):
+    def __init__(self, video_path, stream_name):
         self.video_path = video_path
-        self.topic = topic
-        self.producer = KafkaProducer(
-            bootstrap_servers=kafka_bootstrap_servers,
-            value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-            max_request_size=MAX_MESSAGE_SIZE,
-            buffer_memory=MAX_MESSAGE_SIZE * 10  # Allow buffering multiple messages
-        )
+        self.stream_name = stream_name
         self.frame_id = 0
         self.total_frames = 0
         self.original_fps = 0
 
-    def start(self):
+    async def start_streaming(self):
+        """Stream video frames to NATS JetStream"""
         logger.info("Starting Video Streamer...")
         cap = cv2.VideoCapture(self.video_path)
         if not cap.isOpened():
@@ -36,6 +35,10 @@ class VideoStreamer:
 
         logger.info(f"Video info: {self.total_frames} frames at {self.original_fps} FPS, resolution: {original_width}x{original_height}")
 
+        # Connect to NATS
+        nc = await setup_nats_connection()
+        js = await setup_jetstream(nc)
+
         try:
             start_time = time.time()
             while cap.isOpened():
@@ -43,19 +46,30 @@ class VideoStreamer:
                 if not ret:
                     break
 
-                # Optimize image quality/size ratio for Kafka
-                encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 90]
-                _, buffer = cv2.imencode('.jpg', frame, encode_param)
+                # Save the frame to disk instead of sending it directly
+                frame_filename = f"{self.frame_id:06d}.jpg"
+                frame_path = os.path.join(TEMP_DIR, frame_filename)
 
+                # Optimize image quality/size ratio
+                cv2.imwrite(frame_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+
+                # Send only the metadata and file path via NATS
                 frame_data = {
                     'frame_id': self.frame_id,
                     'timestamp': time.time(),
                     'original_fps': self.original_fps,
                     'width': original_width,
                     'height': original_height,
-                    'frame': buffer.tobytes().hex(),  # Convert bytes to hex string
-                    'is_last_frame': False  # Flag to indicate if this is the last frame
+                    'frame_path': frame_path,  # Store path to file instead of actual frame data
+                    'is_last_frame': False
                 }
+
+                # Convert to JSON string
+                message = json.dumps(frame_data)
+
+                # Publish message to NATS JetStream
+                subject = f"{self.stream_name}.frame"
+                await js.publish(subject, message.encode())
 
                 self.frame_id += 1
 
@@ -65,11 +79,6 @@ class VideoStreamer:
                     frames_per_second = self.frame_id / elapsed if elapsed > 0 else 0
                     logger.info(f"Streamed {self.frame_id}/{self.total_frames} frames ({self.frame_id/self.total_frames*100:.1f}%) at {frames_per_second:.1f} FPS")
 
-                # Send frame to Kafka
-                self.producer.send(self.topic, frame_data)
-
-                # No delay - process as fast as possible
-
             # Send a final message indicating end of stream
             end_message = {
                 'frame_id': self.frame_id,
@@ -77,13 +86,20 @@ class VideoStreamer:
                 'original_fps': self.original_fps,
                 'width': original_width,
                 'height': original_height,
-                'frame': '',  # Empty frame
+                'frame_path': '',  # Empty frame path
                 'is_last_frame': True
             }
-            self.producer.send(self.topic, end_message)
+
+            await js.publish(f"{self.stream_name}.frame", json.dumps(end_message).encode())
             logger.info(f"Streamed all {self.frame_id} frames. Sending end-of-stream signal.")
 
         finally:
             cap.release()
-            self.producer.flush()
+            await nc.close()
             logger.info("Video Streamer finished")
+
+    def start(self):
+        """Start the video streamer (non-async wrapper)"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(self.start_streaming())

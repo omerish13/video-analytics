@@ -1,41 +1,30 @@
-
 import threading
 import time
 
-from entities import (
-    DETECTION_TOPIC,
-    FRAME_TOPIC,
-    KAFKA_BOOTSTRAP_SERVERS,
-    OUTPUT_VIDEO_PATH,
-    delete_kafka_topics,
-    logger,
-    processing_complete,
-    setup_kafka_topics,
-)
+from entities.streamer import VideoStreamer
 from entities.detector import MotionDetector
 from entities.display import VideoDisplay
-from entities.streamer import VideoStreamer
-from utils.menu import get_video_path
-
+from entities import (
+    setup_nats_streams_sync, delete_nats_streams_sync, clean_temp_files,
+    VIDEO_PATH, FRAME_STREAM, DETECTION_STREAM, TEMP_DIR, OUTPUT_VIDEO_PATH,
+    processing_complete
+)
+from utils.logger import logger
 
 def main():
-    # Create new Kafka topics for this run
-    setup_kafka_topics()
-
-    video_path = get_video_path()
-    if not video_path:
-        logger.error("Error: Video path is empty. Exiting.")
-        return
+    # Create NATS streams for this run
+    setup_nats_streams_sync()
 
     try:
         # Create instances of the three components
-        streamer = VideoStreamer(video_path, KAFKA_BOOTSTRAP_SERVERS, FRAME_TOPIC)
-        detector = MotionDetector(KAFKA_BOOTSTRAP_SERVERS, FRAME_TOPIC, DETECTION_TOPIC)
-        display = VideoDisplay(KAFKA_BOOTSTRAP_SERVERS, DETECTION_TOPIC, OUTPUT_VIDEO_PATH)
+        streamer = VideoStreamer(VIDEO_PATH, FRAME_STREAM)
+        detector = MotionDetector(FRAME_STREAM, DETECTION_STREAM)
+        display = VideoDisplay(DETECTION_STREAM, OUTPUT_VIDEO_PATH)
 
         logger.info("Motion detection system starting...")
-        logger.info(f"Processing video: {video_path}")
-        logger.info(f"Topics: frames={FRAME_TOPIC}, detections={DETECTION_TOPIC}")
+        logger.info(f"Processing video: {VIDEO_PATH}")
+        logger.info(f"Streams: frames={FRAME_STREAM}, detections={DETECTION_STREAM}")
+        logger.info(f"Using temporary directory for frames: {TEMP_DIR}")
         logger.info("Results will be saved to a video file for playback after processing")
 
         # Start each component in a separate thread
@@ -78,8 +67,10 @@ def main():
     except Exception as e:
         logger.error(f"Error in main: {e}")
     finally:
-        # Delete Kafka topics used for this run
-        delete_kafka_topics()
+        # Delete NATS streams used for this run
+        delete_nats_streams_sync()
+        # Clean up temporary files
+        clean_temp_files()
         logger.info("Application exited")
 
 if __name__ == "__main__":

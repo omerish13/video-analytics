@@ -1,46 +1,40 @@
 import json
 import os
 import time
-import uuid
 
 import cv2
-import numpy as np
-from kafka import KafkaConsumer
 
-from entities import BLUR_AMOUNT, MAX_MESSAGE_SIZE, OUTPUT_VIDEO_PATH, logger
+
+from entities import (
+    OUTPUT_VIDEO_PATH, setup_nats_connection, setup_jetstream,
+    BLUR_AMOUNT,
+)
+
+from utils.logger import logger
+import asyncio
 
 
 class VideoDisplay:
-    def __init__(self, kafka_bootstrap_servers, topic, output_video_path=OUTPUT_VIDEO_PATH):
+    def __init__(self, stream_name, output_video_path=OUTPUT_VIDEO_PATH):
         """
         Initialize the VideoDisplay component that creates a temporary video file.
 
         Args:
-            kafka_bootstrap_servers (str): Kafka broker address
-            topic (str): Kafka topic to consume from
+            stream_name (str): NATS stream to consume from
             output_video_path (str): Path to save the output video
         """
-        # Initialize Kafka consumer
-        self.consumer = KafkaConsumer(
-            topic,
-            bootstrap_servers=kafka_bootstrap_servers,
-            value_deserializer=lambda v: json.loads(v.decode('utf-8')),
-            auto_offset_reset='earliest',
-            group_id=f'video-display-{uuid.uuid4()}',
-            consumer_timeout_ms=15000,  # 15 second timeout if no messages
-            fetch_max_bytes=MAX_MESSAGE_SIZE,
-            max_partition_fetch_bytes=MAX_MESSAGE_SIZE
-        )
-
+        self.stream_name = stream_name
         self.output_video_path = output_video_path
         self.video_writer = None
         self.frame_buffer = []  # Store frames if we need to determine video properties first
         self.frame_count = 0
         self.original_fps = 30.0  # Default, will be updated from messages
-        self.last_frame_id = -1  # Track the last frame ID to ensure we process in order
         self.expected_frames = 0  # Total expected frames
         self.width = 0
         self.height = 0
+
+        # All frames will be stored here for ordering
+        self.all_frames = []
 
     def process_frame(self, frame, movements):
         """
@@ -111,56 +105,91 @@ class VideoDisplay:
             self.video_writer.write(buffered_frame)
         self.frame_buffer = []  # Clear the buffer
 
-    def start(self):
-        """Process frames from Kafka and save to a temporary video file."""
-        logger.info("Starting Video Display (saving to video file)...")
-        global processing_complete
+    async def collect_frames(self):
+        """Collect all frames from NATS JetStream before processing"""
+        # Connect to NATS
+        nc = await setup_nats_connection()
+        js = await setup_jetstream(nc)
+
+        logger.info(f"Collecting frames from {self.stream_name}...")
+
+        # Use pull-based consumer for bulk collection
+        consumer = await js.pull_subscribe(
+            f"{self.stream_name}.detection",
+            "video_display",
+            stream=self.stream_name
+        )
+
+        end_of_stream = False
+
+        try:
+            while not end_of_stream:
+                try:
+                    # Fetch messages in batches
+                    messages = await consumer.fetch(batch=10, timeout=5)
+
+                    for msg in messages:
+                        data = json.loads(msg.data.decode())
+
+                        # Update metadata if provided
+                        if 'original_fps' in data:
+                            self.original_fps = data['original_fps']
+                        if 'width' in data and 'height' in data:
+                            self.width = data['width']
+                            self.height = data['height']
+
+                        # Check if this is the end-of-stream signal
+                        if data.get('is_last_frame', False):
+                            self.expected_frames = data.get('frame_id', 0)
+                            logger.info(f"VideoDisplay received end-of-stream signal. Expecting {self.expected_frames} frames.")
+                            end_of_stream = True
+                        else:
+                            # Store the frame data for processing
+                            self.all_frames.append(data)
+
+                        # Acknowledge the message
+                        await msg.ack()
+
+                    # Report progress
+                    if len(self.all_frames) % 500 == 0:
+                        logger.info(f"Collected {len(self.all_frames)} frames")
+
+                except Exception as e:
+                    if "timeout" in str(e).lower():
+                        # If we get a timeout, we might be at the end of the stream
+                        logger.info("Timeout while fetching messages, checking if we reached the end")
+                        if len(self.all_frames) > 0 and self.expected_frames > 0:
+                            if len(self.all_frames) >= self.expected_frames - 1:  # -1 because last frame is the signal
+                                logger.info(f"Collected all expected frames: {len(self.all_frames)}")
+                                break
+                    else:
+                        logger.error(f"Error collecting frames: {e}")
+                        break
+
+        finally:
+            # Close NATS connection
+            await nc.close()
+
+        # Sort frames by frame_id
+        self.all_frames.sort(key=lambda x: x['frame_id'])
+        logger.info(f"Collected and sorted {len(self.all_frames)} frames")
+
+    async def process_collected_frames(self):
+        """Process all collected frames and save to video file"""
+        logger.info("Processing collected frames...")
         start_time = time.time()
 
         try:
-            # First pass: collect all frame data in order to properly process all frames
-            all_frames = []
-            metadata_received = False
-
-            for message in self.consumer:
-                data = message.value
-
-                # Update metadata if provided
-                if 'original_fps' in data:
-                    self.original_fps = data['original_fps']
-                if 'width' in data and 'height' in data:
-                    self.width = data['width']
-                    self.height = data['height']
-                    metadata_received = True
-
-                # Check if this is the end-of-stream signal
-                if data.get('is_last_frame', False):
-                    self.expected_frames = data.get('frame_id', 0)
-                    logger.info(f"VideoDisplay received end-of-stream signal. Expecting {self.expected_frames} frames.")
-                    break
-
-                # Store the frame data for processing
-                if not data.get('is_last_frame', False):
-                    all_frames.append(data)
-
-            # Sort frames by frame_id
-            all_frames.sort(key=lambda x: x['frame_id'])
-
             # Process all frames in order
-            for data in all_frames:
-                frame_id = data['frame_id']
+            for data in self.all_frames:
+                # frame_id = data['frame_id']
 
-                # Convert hex string back to bytes and decode image
-                try:
-                    frame_bytes = bytes.fromhex(data['frame'])
-                    frame_arr = np.frombuffer(frame_bytes, dtype=np.uint8)
-                    frame = cv2.imdecode(frame_arr, cv2.IMREAD_COLOR)
+                # Read frame from file
+                frame_path = data['frame_path']
+                frame = cv2.imread(frame_path)
 
-                    if frame is None:
-                        logger.warning(f"Warning: Failed to decode frame {frame_id}")
-                        continue
-                except Exception as e:
-                    logger.error(f"Error decoding frame {frame_id}: {e}")
+                if frame is None:
+                    logger.warning(f"Warning: Failed to read frame from {frame_path}")
                     continue
 
                 # Process the frame
@@ -169,7 +198,7 @@ class VideoDisplay:
 
                 # Initialize video writer if not already done
                 if self.video_writer is None and frame is not None:
-                    if metadata_received:
+                    if self.width > 0 and self.height > 0:
                         self.initialize_video_writer(self.width, self.height)
                     else:
                         self.initialize_video_writer(frame.shape[1], frame.shape[0])
@@ -189,7 +218,7 @@ class VideoDisplay:
                     logger.info(f"Display processed {self.frame_count} frames ({completion:.1f}%) at {frames_per_second:.1f} FPS")
 
         except Exception as e:
-            logger.error(f"Error in Video Display: {e}")
+            logger.error(f"Error processing frames: {e}")
         finally:
             # Release the video writer
             if self.video_writer is not None:
@@ -198,7 +227,30 @@ class VideoDisplay:
             elapsed = time.time() - start_time
             frames_per_second = self.frame_count / elapsed if elapsed > 0 else 0
             logger.info(f"Video Display finished. Processed {self.frame_count} frames at {frames_per_second:.1f} FPS")
+
+    async def start_display(self):
+        """Process frames from NATS JetStream and save to a temporary video file."""
+        logger.info("Starting Video Display (saving to video file)...")
+        global processing_complete
+
+        try:
+            # First collect all frames
+            await self.collect_frames()
+
+            # Then process them in order
+            await self.process_collected_frames()
+
+            # Signal that processing is complete
             processing_complete = True
+
+        except Exception as e:
+            logger.error(f"Error in Video Display: {e}")
+
+    def start(self):
+        """Start the video display (non-async wrapper)"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(self.start_display())
 
     def play_video(self):
         """Play the created video and then delete it."""

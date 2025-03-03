@@ -140,6 +140,12 @@ wheels = [
 ]
 
 [[package]]
+name = "nats-py"
+version = "2.9.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ba/dc/9a01dd9561b736622c0aa3a19f6b40f3eeb22051eaea1475ceb81d5da48d/nats_py-2.9.0.tar.gz", hash = "sha256:01886eb9e0a87f0ec630652cf1fae65d2a8556378a609bc6cc07d2ea60c8d0dd", size = 110714 }
+
+[[package]]
 name = "numpy"
 version = "2.2.2"
 source = { registry = "https://pypi.org/simple" }
@@ -227,6 +233,7 @@ dependencies = [
     { name = "confluent-kafka" },
     { name = "flask" },
     { name = "kafka-python" },
+    { name = "nats-py" },
     { name = "numpy" },
     { name = "opencv-python" },
     { name = "ruff" },
@@ -237,6 +244,7 @@ requires-dist = [
     { name = "confluent-kafka", specifier = ">=2.8.2" },
     { name = "flask", specifier = ">=3.1.0" },
     { name = "kafka-python", specifier = ">=2.0.5" },
+    { name = "nats-py", specifier = ">=2.9.0" },
     { name = "numpy" },
     { name = "opencv-python" },
     { name = "ruff" },
